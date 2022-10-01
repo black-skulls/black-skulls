@@ -7,50 +7,41 @@ use std::{
 use anyhow::Result;
 use superchain_client::futures;
 
-/// A stream of OHLCV candles
-pub struct VolatilityStream<P> {
-    /// A stream of quotes
+use crate::{black_schools_call, VolatilityStream};
+
+/// A stream of black schools
+pub struct BlackSchoolsStream<P> {
+    /// A stream of volatility
     price_stream: P,
-    /// The list of old prices
-    prices: VecDeque<f64>,
-    /// The amount of prices we use for calculating volatility
-    duration: usize,
+    /// The volatility calculator
+    volatility: VolatilityStream<()>,
+    /// The strike price of the option
+    strike: f64,
+    /// The dividends payed by the underlying
+    discount: f64,
 }
 
-impl<P> VolatilityStream<P> {
+impl<P> BlackSchoolsStream<P> {
     /// Create a new volatility stream from a price stream
-    pub fn new(price_stream: P, duration: usize) -> Self {
+    pub fn new(price_stream: P, volatility_duration: usize, strike: f64, discount: f64) -> Self {
         Self {
             price_stream,
-            prices: VecDeque::new(),
-            duration,
+            volatility: VolatilityStream::new((), volatility_duration),
+            strike,
+            discount,
         }
     }
 
     /// Handle the next price quote
     pub fn try_handle_price(&mut self, price: f64) -> Option<f64> {
-        if price.is_infinite() || price.is_nan() {
-            return None;
-        }
+        let volatility = self.volatility.try_handle_price(price)?;
+        let options_price = black_schools_call(price, self.strike, self.discount, volatility);
 
-        self.prices.push_back(price);
-        if self.prices.len() < self.duration {
-            return None;
-        }
-
-        let mut sum: f64 = 0.0;
-        let mean: f64 = self.prices.iter().sum::<f64>() / self.prices.len() as f64;
-        for i in 0..self.prices.len() {
-            sum += (self.prices[i] - mean).powi(2);
-        }
-        let variance: f64 = sum / (self.prices.len() as f64);
-        let volatility: f64 = variance.sqrt();
-
-        Some(volatility)
+        Some(options_price)
     }
 }
 
-impl<Q> futures::Stream for VolatilityStream<Q>
+impl<Q> futures::Stream for BlackSchoolsStream<Q>
 where
     Q: futures::Stream<Item = Result<f64>> + Unpin,
 {
@@ -65,7 +56,7 @@ where
         };
 
         match self.try_handle_price(price) {
-            Some(volatility) => Poll::Ready(Some(Ok(volatility))),
+            Some(options_price) => Poll::Ready(Some(Ok(options_price))),
             None => {
                 cx.waker().wake_by_ref();
                 Poll::Pending

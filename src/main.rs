@@ -8,11 +8,15 @@ use superchain_client::{
 };
 
 use crate::{
+    black_schools::{call as black_schools_put, call_discount as black_schools_call},
+    black_schools_stream::BlackSchoolsStream,
     candle_stream::{Candle, CandleStream},
     quote::Quote,
     volatility_stream::VolatilityStream,
 };
 
+mod black_schools;
+mod black_schools_stream;
 mod candle_stream;
 mod quote;
 mod volatility_stream;
@@ -23,6 +27,8 @@ const USDC: H160 = H160([
 ]);
 const CANDLE_DURATION: time::Duration = time::Duration::minutes(10);
 const VOLATILITY_DURATION: usize = 1000;
+const STRIKE: f64 = 1.;
+const DIVIDENDS: f64 = 0.;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -42,12 +48,12 @@ async fn main() -> anyhow::Result<()> {
         .map_err(anyhow::Error::from)
         .map_ok(|price| price.price);
     futures::pin_mut!(prices);
-    let volatility = VolatilityStream::new(prices, VOLATILITY_DURATION);
-    futures::pin_mut!(volatility);
+    let black_schools = BlackSchoolsStream::new(prices, VOLATILITY_DURATION, STRIKE, DIVIDENDS);
+    futures::pin_mut!(black_schools);
 
-    while let Some(volatility) = volatility.next().await {
-        let volatility = volatility?;
-        println!("{volatility}");
+    while let Some(options_price) = black_schools.next().await {
+        let options_price = options_price?;
+        println!("{options_price}");
     }
 
     Ok(())
