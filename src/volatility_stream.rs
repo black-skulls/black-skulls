@@ -36,6 +36,8 @@ impl<P> VolatilityStream<P> {
         self.prices.push_back(price);
         if self.prices.len() < self.duration {
             return None;
+        } else if prices.len() > self.duration {
+            self.prices.pop_back();
         }
 
         let mut sum: f64 = 0.0;
