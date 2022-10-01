@@ -1,72 +1,142 @@
 use std::{
-    collections::VecDeque,
     pin::Pin,
     task::{Context, Poll},
 };
 
 use anyhow::Result;
-use superchain_client::futures;
+use superchain_client::futures::{self, pin_mut, Stream, StreamExt, TryStreamExt};
 
-/// A stream of OHLCV candles
-pub struct VolatilityStream<P> {
-    /// A stream of quotes
-    price_stream: P,
-    /// The list of old prices
-    prices: VecDeque<f64>,
-    /// The amount of prices we use for calculating volatility
-    duration: usize,
+use crate::{Priced, Volatility};
+/*
+struct State {
+    memory: u32,
+    last_variance: f64,
+    count: u32,
+    sum_prices: f64,
 }
 
-impl<P> VolatilityStream<P> {
+impl State {
+    fn new(memory: u32) -> Self {
+        Self {
+            memory,
+            last_variance: 0.0,
+            count: 0,
+            sum_prices: 0.0,
+        }
+    }
+}
+
+async fn clean_price<P: Priced>(priced: &P) -> bool {
+    let price = priced.price();
+    !price.is_infinite() && !price.is_nan()
+}
+
+async fn handle_price<P: Priced>(state: &mut State, priced: P) -> Option<Volatility<P>> {
+    let price = priced.price();
+
+    // let nominator1 = f64::try_from(u32::from(state.memory - 1) * u32::from(state.count)).ok()?;
+    // let denominator =
+    //     f64::try_from(u32::from(state.memory + 1) * u32::from(state.count + 1)).ok()?;
+    // let nominator2 = 4f64;
+    let nominator1 = f64::try_from(u32::from(state.count)).unwrap();
+    let denominator = f64::try_from(u32::from(state.count + 1)).unwrap();
+    let nominator2 = 2f64;
+
+    let variance =
+        (nominator1 * state.last_variance + nominator2 * price * state.sum_prices) / denominator;
+
+    state.sum_prices += price;
+    state.count += 1;
+    state.last_variance = variance;
+
+    let vol = Volatility::<P> {
+        priced,
+        value: variance.sqrt(),
+    };
+    Some(vol)
+}
+
+pub fn volatility_stream<Q, P>(price_stream: Q, memory: u32) -> impl Stream<Item = P>
+where
+    Q: Stream<Item = P>,
+    P: Priced,
+{
+    let init = State::new(memory);
+    price_stream.filter(clean_price) /* .scan(init, handle_price)*/
+}
+*/
+/// A stream of OHLCV candles
+pub struct VolatilityStream<Q, P> {
+    /// A stream of quotes
+    price_stream: Q,
+    /// The amount of prices we use for calculating volatility
+    memory: u32,
+    last_variance: f64,
+    count: u32,
+    sum_prices: f64,
+    _p: std::marker::PhantomData<P>,
+}
+
+impl<Q, P: Priced> VolatilityStream<Q, P> {
     /// Create a new volatility stream from a price stream
-    pub fn new(price_stream: P, duration: usize) -> Self {
+    pub fn new(price_stream: Q, memory: u32) -> Self {
         Self {
             price_stream,
-            prices: VecDeque::new(),
-            duration,
+            memory,
+            last_variance: 0.0,
+            count: 0,
+            sum_prices: 0.0,
+            _p: Default::default(),
         }
     }
 
     /// Handle the next price quote
-    pub fn try_handle_price(&mut self, price: f64) -> Option<f64> {
+    pub fn try_handle_price(&mut self, priced: P) -> Option<Volatility<P>> {
+        let price = priced.price();
         if price.is_infinite() || price.is_nan() {
+            // plain old data cleaning
             return None;
         }
 
-        self.prices.push_back(price);
-        if self.prices.len() < self.duration {
-            return None;
-        } else if prices.len() > self.duration {
-            self.prices.pop_back();
-        }
+        let nominator1 = f64::try_from(u32::from(self.memory - 1) * u32::from(self.count)).ok()?;
+        let denominator =
+            f64::try_from(u32::from(self.memory + 1) * u32::from(self.count + 1)).ok()?;
+        let nominator2 = 4f64;
+        // let nominator1 = f64::try_from(u32::from(self.count)).ok()?;
+        // let denominator = f64::try_from(u32::from(self.count + 1)).ok()?;
+        // let nominator2 = 2f64;
 
-        let mut sum: f64 = 0.0;
-        let mean: f64 = self.prices.iter().sum::<f64>() / self.prices.len() as f64;
-        for i in 0..self.prices.len() {
-            sum += (self.prices[i] - mean).powi(2);
-        }
-        let variance: f64 = sum / (self.prices.len() as f64);
-        let volatility: f64 = variance.sqrt();
+        let variance =
+            (nominator1 * self.last_variance + nominator2 * price * self.sum_prices) / denominator;
 
-        Some(volatility)
+        self.sum_prices += price;
+        self.count += 1;
+        self.last_variance = variance;
+
+        let vol = Volatility::<P> {
+            priced,
+            value: variance.sqrt(),
+        };
+        Some(vol)
     }
 }
 
-impl<Q> futures::Stream for VolatilityStream<Q>
+impl<Q, P> Stream for VolatilityStream<Q, P>
 where
-    Q: futures::Stream<Item = Result<f64>> + Unpin,
+    Q: Stream<Item = Result<P>> + Unpin,
+    P: Priced + Unpin,
 {
-    type Item = Result<f64>;
+    type Item = Result<Volatility<P>>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let price = match Pin::new(&mut self.price_stream).poll_next(cx) {
-            Poll::Ready(Some(Ok(price))) => price,
+        let priced = match Pin::new(&mut self.price_stream).poll_next(cx) {
+            Poll::Ready(Some(Ok(priced))) => priced,
             Poll::Ready(Some(Err(err))) => return Poll::Ready(Some(Err(err))),
             Poll::Ready(None) => return Poll::Ready(None),
             Poll::Pending => return Poll::Pending,
         };
 
-        match self.try_handle_price(price) {
+        match self.try_handle_price(priced) {
             Some(volatility) => Poll::Ready(Some(Ok(volatility))),
             None => {
                 cx.waker().wake_by_ref();

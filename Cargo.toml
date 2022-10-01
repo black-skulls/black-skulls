@@ -5,9 +5,8 @@ edition = "2021"
 
 [dependencies]
 anyhow = { version = "1.0.65", features = ["backtrace"] }
-nrfind = "1.0.3"
-special = "0.8.1"
+humantime = "2.1.0"
+plotlib = "0.5.1"
 superchain-client = { git = "https://github.com/SuperChainNetwork/superchain-client" }
 time = "0.3.14"
 tokio = { version = "1.20.1", features = ["full"] }
-wide = "0.7.4"

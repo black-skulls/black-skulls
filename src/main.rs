@@ -1,34 +1,37 @@
+use std::time::{Duration, SystemTime};
+
 use superchain_client::{
     config,
     ethers::types::H160,
     futures::{self, StreamExt, TryStreamExt},
     tokio_tungstenite::connect_async,
     tungstenite::{client::IntoClientRequest, http::header::AUTHORIZATION},
-    WsClient,
+    Price, WsClient,
 };
 
-use crate::{
-    black_schools::{call as black_schools_put, call_discount as black_schools_call},
-    black_schools_stream::BlackSchoolsStream,
-    candle_stream::{Candle, CandleStream},
-    quote::Quote,
-    volatility_stream::VolatilityStream,
-};
+use crate::volatility_stream::VolatilityStream;
 
-mod black_schools;
-mod black_schools_stream;
-mod candle_stream;
-mod quote;
 mod volatility_stream;
 
 const URL: &str = "wss://beta.superchain.app/websocket";
 const USDC: H160 = H160([
     180, 225, 109, 1, 104, 229, 45, 53, 202, 205, 44, 97, 133, 180, 66, 129, 236, 40, 201, 220,
 ]);
-const CANDLE_DURATION: time::Duration = time::Duration::minutes(10);
-const VOLATILITY_DURATION: usize = 1000;
-const STRIKE: f64 = 1.;
-const DIVIDENDS: f64 = 0.;
+
+pub trait Priced {
+    fn price(&self) -> f64;
+}
+
+impl Priced for Price {
+    fn price(&self) -> f64 {
+        self.price
+    }
+}
+
+pub struct Volatility<T: Priced> {
+    priced: T,
+    value: f64,
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -45,16 +48,36 @@ async fn main() -> anyhow::Result<()> {
     let prices = client
         .get_prices([USDC], Some(15500000), Some(15600000))
         .await?
-        .map_err(anyhow::Error::from)
-        .map_ok(|price| price.price);
-    futures::pin_mut!(prices);
-    let black_schools = BlackSchoolsStream::new(prices, VOLATILITY_DURATION, STRIKE, DIVIDENDS);
-    futures::pin_mut!(black_schools);
+        .map_err(anyhow::Error::from);
+    let volatility = VolatilityStream::new(prices, 500);
+    futures::pin_mut!(volatility);
 
-    while let Some(options_price) = black_schools.next().await {
-        let options_price = options_price?;
-        println!("{options_price}");
-    }
+    let data: Vec<(f64, f64)> = volatility
+        //.skip(1000)
+        .filter_map(|v_res| async { v_res.ok().map(|v| (v.priced.timestamp as f64, v.value)) })
+        .collect()
+        .await;
+    // while let Some(point) = volatility.next().await {
+    //     let point = point?;
+    //     println!(
+    //         "{},{}",
+    //         humantime::format_rfc3339_seconds(
+    //             SystemTime::UNIX_EPOCH
+    //                 + Duration::from_secs(u64::try_from(point.priced.timestamp).unwrap())
+    //         ),
+    //         point.value
+    //     );
+    // }
+
+    let line_chart = plotlib::repr::Plot::new(data).line_style(
+        plotlib::style::LineStyle::new()
+            .colour("black")
+            .linejoin(plotlib::style::LineJoin::Round),
+    );
+    let view = plotlib::view::ContinuousView::new().add(line_chart);
+    plotlib::page::Page::single(&view)
+        .save("vol.svg")
+        .expect("msg");
 
     Ok(())
 }
