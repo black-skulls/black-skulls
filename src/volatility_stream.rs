@@ -3,8 +3,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use anyhow::Result;
-use superchain_client::futures::{self, pin_mut, Stream, StreamExt, TryStreamExt};
+use superchain_client::futures::Stream;
 
 use crate::{Priced, Volatility};
 /*
@@ -114,7 +113,7 @@ impl<Q, P: Priced> VolatilityStream<Q, P> {
         self.last_variance = variance;
 
         let vol = Volatility::<P> {
-            priced,
+            _priced: priced,
             value: variance.sqrt(),
         };
         Some(vol)
@@ -123,21 +122,20 @@ impl<Q, P: Priced> VolatilityStream<Q, P> {
 
 impl<Q, P> Stream for VolatilityStream<Q, P>
 where
-    Q: Stream<Item = Result<P>> + Unpin,
+    Q: Stream<Item = P> + Unpin,
     P: Priced + Unpin,
 {
-    type Item = Result<Volatility<P>>;
+    type Item = Volatility<P>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let priced = match Pin::new(&mut self.price_stream).poll_next(cx) {
-            Poll::Ready(Some(Ok(priced))) => priced,
-            Poll::Ready(Some(Err(err))) => return Poll::Ready(Some(Err(err))),
+            Poll::Ready(Some(priced)) => priced,
             Poll::Ready(None) => return Poll::Ready(None),
             Poll::Pending => return Poll::Pending,
         };
 
         match self.try_handle_price(priced) {
-            Some(volatility) => Poll::Ready(Some(Ok(volatility))),
+            Some(volatility) => Poll::Ready(Some(volatility)),
             None => {
                 cx.waker().wake_by_ref();
                 Poll::Pending

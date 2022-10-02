@@ -1,9 +1,10 @@
 use std::time::{Duration, SystemTime};
 
+use anyhow::Result;
 use superchain_client::{
     config,
     ethers::types::H160,
-    futures::{self, StreamExt, TryStreamExt},
+    futures::{self, pin_mut, Stream, StreamExt, TryStreamExt},
     tokio_tungstenite::connect_async,
     tungstenite::{client::IntoClientRequest, http::header::AUTHORIZATION},
     Price, WsClient,
@@ -29,8 +30,27 @@ impl Priced for Price {
 }
 
 pub struct Volatility<T: Priced> {
-    priced: T,
+    _priced: T,
     value: f64,
+}
+
+async fn timestamp<Q: Stream<Item = Price> + Unpin>(price_stream: Q, output: &mut Vec<f64>) -> () {
+    let output2 = price_stream
+        .map(|p| p.timestamp as f64)
+        .collect::<Vec<_>>()
+        .await;
+    *output = output2;
+}
+
+async fn volatility<Q: Stream<Item = Price> + Unpin>(
+    price_stream: Q,
+    memory: u32,
+    output: &mut Vec<f64>,
+) -> () {
+    let vol_stream = VolatilityStream::new(price_stream, memory);
+    futures::pin_mut!(vol_stream);
+    let output2 = vol_stream.map(|v| v.value).collect::<Vec<_>>().await;
+    *output = output2;
 }
 
 #[tokio::main]
@@ -49,35 +69,63 @@ async fn main() -> anyhow::Result<()> {
         .get_prices([USDC], Some(15500000), Some(15600000))
         .await?
         .map_err(anyhow::Error::from);
-    let volatility = VolatilityStream::new(prices, 500);
-    futures::pin_mut!(volatility);
 
-    let data: Vec<(f64, f64)> = volatility
-        //.skip(1000)
-        .filter_map(|v_res| async { v_res.ok().map(|v| (v.priced.timestamp as f64, v.value)) })
-        .collect()
-        .await;
-    // while let Some(point) = volatility.next().await {
-    //     let point = point?;
-    //     println!(
-    //         "{},{}",
-    //         humantime::format_rfc3339_seconds(
-    //             SystemTime::UNIX_EPOCH
-    //                 + Duration::from_secs(u64::try_from(point.priced.timestamp).unwrap())
-    //         ),
-    //         point.value
-    //     );
-    // }
+    let (tx, rx) = async_channel::unbounded();
 
-    let line_chart = plotlib::repr::Plot::new(data).line_style(
+    let mut timestamps = Vec::<f64>::new();
+    let mut vol50 = Vec::<f64>::new();
+    let mut vol500 = Vec::<f64>::new();
+    let mut vol5000 = Vec::<f64>::new();
+    tokio_scoped::scope(|s| {
+        s.spawn(timestamp(rx.clone(), &mut timestamps));
+        s.spawn(volatility(rx.clone(), 50, &mut vol50));
+        s.spawn(volatility(rx.clone(), 500, &mut vol500));
+        s.spawn(volatility(rx.clone(), 5000, &mut vol5000));
+        s.spawn(async move {
+            prices
+                .filter_map(|p_res| async { p_res.ok() })
+                .for_each(|p| async { tx.send(p).await.unwrap() })
+                .await
+        });
+    });
+
+    let data50: Vec<(f64, f64)> = timestamps
+        .iter()
+        .cloned()
+        .zip(vol50.iter().cloned())
+        .collect();
+    let data500: Vec<(f64, f64)> = timestamps
+        .iter()
+        .cloned()
+        .zip(vol500.iter().cloned())
+        .collect();
+    let data5000: Vec<(f64, f64)> = timestamps
+        .iter()
+        .cloned()
+        .zip(vol5000.iter().cloned())
+        .collect();
+
+    let line_chart50 = plotlib::repr::Plot::new(data50).line_style(
         plotlib::style::LineStyle::new()
             .colour("black")
             .linejoin(plotlib::style::LineJoin::Round),
     );
-    let view = plotlib::view::ContinuousView::new().add(line_chart);
+    let line_chart500 = plotlib::repr::Plot::new(data500).line_style(
+        plotlib::style::LineStyle::new()
+            .colour("black")
+            .linejoin(plotlib::style::LineJoin::Round),
+    );
+    let line_chart5000 = plotlib::repr::Plot::new(data5000).line_style(
+        plotlib::style::LineStyle::new()
+            .colour("black")
+            .linejoin(plotlib::style::LineJoin::Round),
+    );
+    let view = plotlib::view::ContinuousView::new()
+        .add(line_chart50)
+        .add(line_chart500)
+        .add(line_chart5000);
     plotlib::page::Page::single(&view)
         .save("vol.svg")
         .expect("msg");
-
     Ok(())
 }
