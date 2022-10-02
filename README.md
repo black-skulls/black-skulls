@@ -9,4 +9,4 @@ $ cargo run
 ...
 ```
 
-You get a `vol.svg` created in the currect folder. You can open that with a browser or your favorite image editor.
+You get a `vol.svg` created in the currect folder. You can open that with a browser or your favorite image editor, and view the amazing Volatility graph.
