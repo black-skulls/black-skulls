@@ -1,23 +1,22 @@
-use std::time::{Duration, SystemTime};
+mod volatility_stream;
 
-use anyhow::Result;
 use superchain_client::{
     config,
     ethers::types::H160,
-    futures::{self, pin_mut, Stream, StreamExt, TryStreamExt},
+    futures::{self, Stream, StreamExt, TryStreamExt},
     tokio_tungstenite::connect_async,
     tungstenite::{client::IntoClientRequest, http::header::AUTHORIZATION},
     Price, WsClient,
 };
 
-use crate::volatility_stream::VolatilityStream;
-
-mod volatility_stream;
+use volatility_stream::volatility_stream;
 
 const URL: &str = "wss://beta.superchain.app/websocket";
 const USDC: H160 = H160([
     180, 225, 109, 1, 104, 229, 45, 53, 202, 205, 44, 97, 133, 180, 66, 129, 236, 40, 201, 220,
 ]);
+const FROM_BLOCK: Option<u64> = Some(15500000);
+const TO_BLOCK_INC: Option<u64> = Some(15600000);
 
 pub trait Priced {
     fn price(&self) -> f64;
@@ -42,12 +41,12 @@ async fn timestamp<Q: Stream<Item = Price> + Unpin>(price_stream: Q, output: &mu
     *output = output2;
 }
 
-async fn volatility<Q: Stream<Item = Price> + Unpin>(
+async fn volatility<Q: Stream<Item = Price> + Unpin + 'static>(
     price_stream: Q,
     memory: u32,
     output: &mut Vec<f64>,
 ) -> () {
-    let vol_stream = VolatilityStream::new(price_stream, memory);
+    let vol_stream = volatility_stream(price_stream, memory);
     futures::pin_mut!(vol_stream);
     let output2 = vol_stream.map(|v| v.value).collect::<Vec<_>>().await;
     *output = output2;
@@ -66,7 +65,7 @@ async fn main() -> anyhow::Result<()> {
     let client = WsClient::new(websocket).await;
 
     let prices = client
-        .get_prices([USDC], Some(15500000), Some(15600000))
+        .get_prices([USDC], FROM_BLOCK, TO_BLOCK_INC)
         .await?
         .map_err(anyhow::Error::from);
 
@@ -107,17 +106,17 @@ async fn main() -> anyhow::Result<()> {
 
     let line_chart50 = plotlib::repr::Plot::new(data50).line_style(
         plotlib::style::LineStyle::new()
-            .colour("black")
+            .colour("red")
             .linejoin(plotlib::style::LineJoin::Round),
     );
     let line_chart500 = plotlib::repr::Plot::new(data500).line_style(
         plotlib::style::LineStyle::new()
-            .colour("black")
+            .colour("orange")
             .linejoin(plotlib::style::LineJoin::Round),
     );
     let line_chart5000 = plotlib::repr::Plot::new(data5000).line_style(
         plotlib::style::LineStyle::new()
-            .colour("black")
+            .colour("green")
             .linejoin(plotlib::style::LineJoin::Round),
     );
     let view = plotlib::view::ContinuousView::new()
